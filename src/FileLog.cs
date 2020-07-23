@@ -76,6 +76,7 @@ namespace BeetleX.FastHttpApi
         {
             Add(new LogItem(type, message));
         }
+
         public void Add(LogItem e)
         {
             mDispatcher.Enqueue(e);
@@ -96,5 +97,14 @@ namespace BeetleX.FastHttpApi
         {
 
         }
+    }
+
+    public class LogRecord
+    {
+        public string Type { get; set; }
+
+        public string Time { get; set; }
+
+        public string Message { get; set; }
     }
 }

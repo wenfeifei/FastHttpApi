@@ -1,13 +1,14 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace BeetleX.FastHttpApi
 {
     public interface IActionResultHandler
     {
         void Success(object result);
-        void Error(Exception e_, EventArgs.LogType logType = EventArgs.LogType.Error);
+        void Error(Exception e_, EventArgs.LogType logType = EventArgs.LogType.Error, int code = 500);
     }
 
     struct WSActionResultHandler : IActionResultHandler
@@ -33,17 +34,17 @@ namespace BeetleX.FastHttpApi
 
         public WebSockets.DataFrame DataFrame;
 
-        public void Error(Exception e_, EventArgs.LogType logType = EventArgs.LogType.Error)
+        public void Error(Exception e_, EventArgs.LogType logType = EventArgs.LogType.Error, int code = 500)
         {
             if (Server.EnableLog(logType))
-                Server.Log(logType, "{0} ws execute {1} inner error {2}@{3}", Request.RemoteIPAddress, Request.Url, e_.Message, e_.StackTrace);
-            Result.Code = 500;
+                Server.Log(logType, $"Websocket {Request.ID} {Request.RemoteIPAddress} execute {DataContext.ActionUrl} inner error {e_.Message}@{e_.StackTrace}");
+            Result.Code = code;
             Result.Error = e_.Message;
             if (Server.Options.OutputStackTrace)
             {
                 Result.StackTrace = e_.StackTrace;
             }
-            DataFrame.Send(Request.Session);
+            DataFrame.Send(Request.Session, true);
         }
 
         public long StartTime;
@@ -62,11 +63,12 @@ namespace BeetleX.FastHttpApi
             {
                 Result.Data = result;
             }
-            DataFrame.Send(Request.Session);
+            DataFrame.Send(Request.Session, false);
             if (Server.EnableLog(EventArgs.LogType.Info))
-                Server.Log(EventArgs.LogType.Info, "{0} ws execute {1} action use time:{2}ms", Request.RemoteIPAddress,
-                    DataContext.ActionUrl, Server.BaseServer.GetRunTime() - StartTime);
+                Server.Log(EventArgs.LogType.Info, $"Websocket {Request.ID} {Request.RemoteIPAddress} execute {DataContext.ActionUrl} action use time:{ Server.BaseServer.GetRunTime() - StartTime}ms");
         }
+
+
     }
 
     struct HttpActionResultHandler : IActionResultHandler
@@ -88,12 +90,13 @@ namespace BeetleX.FastHttpApi
 
         public long StartTime;
 
-        public void Error(Exception e_, EventArgs.LogType logType = EventArgs.LogType.Error)
+        public void Error(Exception e_, EventArgs.LogType logType = EventArgs.LogType.Error, int code = 500)
         {
             if (Server.EnableLog(logType))
                 Server.Log(logType,
-                    $"{Request.RemoteIPAddress} http {Request.Method} { Request.Url} inner error {e_.Message}@{e_.StackTrace}");
+                    $"HTTP {Request.ID} {Request.RemoteIPAddress} {Request.Method} { Request.Url} inner error {e_.Message}@{e_.StackTrace}");
             InnerErrorResult result = new InnerErrorResult($"http execute {Request.BaseUrl} error ", e_, Server.Options.OutputStackTrace);
+            result.Code = code.ToString();
             Response.Result(result);
         }
 
@@ -101,8 +104,15 @@ namespace BeetleX.FastHttpApi
         {
             if (Server.EnableLog(EventArgs.LogType.Info))
                 Server.BaseServer.Log(EventArgs.LogType.Info, Request.Session,
-                    $"{Request.RemoteIPAddress} http {Request.Method} {Request.BaseUrl} use time:{Server.BaseServer.GetRunTime() - StartTime}ms");
-            Response.Result(result);
+                    $"HTTP {Request.ID} {Request.RemoteIPAddress} {Request.Method} {Request.BaseUrl} use time:{Server.BaseServer.GetRunTime() - StartTime}ms");
+            if (result is FileResult fileResult)
+            {
+                Server.ResourceCenter.OutputFile(fileResult, Request, Response);
+            }
+            else
+            {
+                Response.Result(result);
+            }
         }
     }
 }

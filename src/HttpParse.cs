@@ -19,6 +19,19 @@ namespace BeetleX.FastHttpApi
         public const string OPTIONS_TAG = "OPTIONS";
 
         [ThreadStatic]
+        private static StringBuilder mStringBuilderBuffer;
+
+        public static StringBuilder StringBuilderBuffer
+        {
+            get
+            {
+                if (mStringBuilderBuffer == null)
+                    mStringBuilderBuffer = new StringBuilder();
+                return mStringBuilderBuffer;
+            }
+        }
+
+        [ThreadStatic]
         private static char[] mCharCacheBuffer;
 
         public static char[] GetCharBuffer()
@@ -193,6 +206,8 @@ namespace BeetleX.FastHttpApi
                         context.SetValue(name, System.Net.WebUtility.UrlDecode(value));
                         offset = i + 1;
                     }
+                    else
+                        offset = i + 1;
                     name = null;
 
                 }
@@ -266,7 +281,7 @@ namespace BeetleX.FastHttpApi
                 {
                     if (!string.IsNullOrEmpty(name))
                     {
-                        value = new string(line.Slice(offset + 1, i - offset - 2));
+                        value = new string(line.Slice(offset, i - offset));
                         proerties.Add(new ContentHeaderProperty() { Name = name, Value = value });
                         offset = i + 1;
                         name = null;
@@ -275,7 +290,7 @@ namespace BeetleX.FastHttpApi
             }
             if (name != null)
             {
-                value = new string(line.Slice(offset + 1, line.Length - offset - 2));
+                value = new string(line.Slice(offset, line.Length - offset));
                 proerties.Add(new ContentHeaderProperty() { Name = name, Value = value });
             }
             return proerties.ToArray();
@@ -315,14 +330,19 @@ namespace BeetleX.FastHttpApi
         }
 
 
-
+        public static Tuple<string, string> AnalyzeHeader(ReadOnlySpan<byte> line)
+        {
+            Span<char> charbuffer = GetCharBuffer();
+            var len = Encoding.UTF8.GetChars(line, charbuffer);
+            return AnalyzeHeader(charbuffer.Slice(0, len));
+        }
         public static Tuple<string, string> AnalyzeHeader(ReadOnlySpan<char> line)
         {
             string name = null, value = null;
             int offset = 0;
             for (int i = 0; i < line.Length; i++)
             {
-                if (line[i] == ':')
+                if (line[i] == ':' && name == null)
                 {
                     name = new string(line.Slice(offset, i - offset));
                     offset = i + 1;
@@ -342,9 +362,16 @@ namespace BeetleX.FastHttpApi
             return new Tuple<string, string>(name, value);
         }
 
-
-        public static void AnalyzeResponseLine(ReadOnlySpan<char> line, Clients.Response response)
+        public static Tuple<string, int, string> AnalyzeResponseLine(ReadOnlySpan<byte> line)
         {
+            Span<char> charbuffer = GetCharBuffer();
+            var len = Encoding.UTF8.GetChars(line, charbuffer);
+            return AnalyzeResponseLine(charbuffer.Slice(0, len));
+        }
+        public static Tuple<string, int, string> AnalyzeResponseLine(ReadOnlySpan<char> line)
+        {
+            string httpversion = null, codemsg = null;
+            int code = 200;
             int offset = 0;
             int count = 0;
             for (int i = 0; i < line.Length; i++)
@@ -353,20 +380,46 @@ namespace BeetleX.FastHttpApi
                 {
                     if (count == 0)
                     {
-                        response.HttpVersion = new string(line.Slice(offset, i - offset));
+                        httpversion = new string(line.Slice(offset, i - offset));
                         offset = i + 1;
                     }
                     else
                     {
-                        response.Code = new string(line.Slice(offset, i - offset));
+                        code = int.Parse(line.Slice(offset, i - offset));
                         offset = i + 1;
-                        response.CodeMsg = new string(line.Slice(offset, line.Length - offset));
-                        return;
+                        codemsg = new string(line.Slice(offset, line.Length - offset));
+                        break;
                     }
                     count++;
                 }
             }
+            return new Tuple<string, int, string>(httpversion, code, codemsg);
         }
+
+        //public static void AnalyzeResponseLine(ReadOnlySpan<char> line, Clients.Response response)
+        //{
+        //    int offset = 0;
+        //    int count = 0;
+        //    for (int i = 0; i < line.Length; i++)
+        //    {
+        //        if (line[i] == ' ')
+        //        {
+        //            if (count == 0)
+        //            {
+        //                response.HttpVersion = new string(line.Slice(offset, i - offset));
+        //                offset = i + 1;
+        //            }
+        //            else
+        //            {
+        //                response.Code = new string(line.Slice(offset, i - offset));
+        //                offset = i + 1;
+        //                response.CodeMsg = new string(line.Slice(offset, line.Length - offset));
+        //                return;
+        //            }
+        //            count++;
+        //        }
+        //    }
+        //}
 
         public static void AnalyzeRequestLine(ReadOnlySpan<char> line, HttpRequest request)
         {
@@ -406,7 +459,11 @@ namespace BeetleX.FastHttpApi
                     qsdata = url.Slice(i + 1, url.Length - i - 1);
                     break;
                 }
+                if (url[i] == '/')
+                    request.PathLevel++;
             }
+            if (queryString == null)
+                return result;
             if (result > 0)
             {
                 string name = null;
@@ -441,28 +498,17 @@ namespace BeetleX.FastHttpApi
 
         public static void ReadUrlPathAndExt(ReadOnlySpan<char> url, QueryString queryString, HttpRequest request, HttpOptions config)
         {
-            bool urlIgnoreCase = config.UrlIgnoreCase;
-
-            if (urlIgnoreCase)
-                request.BaseUrl = CharToLower(url);
-            else
-                request.BaseUrl = new string(url);
+            request.BaseUrl = new string(url);
             for (int i = url.Length - 1; i >= 0; i--)
             {
                 if (url[i] == '.' && request.Ext == null)
                 {
-                    if (urlIgnoreCase)
-                        request.Ext = CharToLower(url.Slice(i + 1, url.Length - i - 1));
-                    else
-                        request.Ext = new string(url.Slice(i + 1, url.Length - i - 1));
+                    request.Ext = CharToLower(url.Slice(i + 1, url.Length - i - 1));
                     continue;
                 }
                 if (url[i] == '/')
                 {
-                    if (urlIgnoreCase)
-                        request.Path = CharToLower(url.Slice(0, i + 1));
-                    else
-                        request.Path = new string(url.Slice(0, i + 1));
+                    request.Path = new string(url.Slice(0, i + 1));
                     return;
                 }
             }

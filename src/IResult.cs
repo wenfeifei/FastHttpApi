@@ -3,6 +3,7 @@ using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -10,7 +11,7 @@ namespace BeetleX.FastHttpApi
 {
     public interface IResult
     {
-        string ContentType { get; }
+        IHeaderItem ContentType { get; }
 
         int Length { get; set; }
 
@@ -23,7 +24,7 @@ namespace BeetleX.FastHttpApi
 
     public abstract class ResultBase : IResult
     {
-        public virtual string ContentType => "text/plain";
+        public virtual IHeaderItem ContentType => ContentTypes.TEXT_UTF8;
 
         public virtual int Length { get; set; }
 
@@ -43,6 +44,34 @@ namespace BeetleX.FastHttpApi
 
 
 
+    public class BadRequestResult : ResultBase
+    {
+        public BadRequestResult(string message)
+        {
+            Message = message;
+        }
+
+        public BadRequestResult(string formater, params object[] data) : this(string.Format(formater, data)) { }
+
+        public string Message { get; set; }
+
+
+        public override bool HasBody => true;
+
+        public override void Setting(HttpResponse response)
+        {
+            response.Code = "400";
+            response.CodeMsg = "Bad Request";
+            response.Request.ClearStream();
+        }
+
+        public override void Write(PipeStream stream, HttpResponse response)
+        {
+            stream.Write(Message);
+        }
+    }
+
+
     public class NotFoundResult : ResultBase
     {
         public NotFoundResult(string message)
@@ -59,7 +88,6 @@ namespace BeetleX.FastHttpApi
 
         public override void Setting(HttpResponse response)
         {
-            response.Request.Server.RequestError();
             response.Code = "404";
             response.CodeMsg = "not found";
             response.Request.ClearStream();
@@ -84,44 +112,86 @@ namespace BeetleX.FastHttpApi
         }
     }
 
+
+
     public class InnerErrorResult : ResultBase
     {
         public InnerErrorResult(string code, string messge)
         {
             Code = code;
-            Error = messge;
+            Message = messge;
         }
 
-        public InnerErrorResult(string message, Exception e, bool outputStackTrace)
+
+        public InnerErrorResult(string message, Exception e, bool outputStackTrace) : this("500", message, e, outputStackTrace)
         {
-            Error = message + ":" + e.Message;
-            if (e.InnerException != null)
-                Error += "->" + e.InnerException.Message;
-            if (outputStackTrace)
-                Code = e.StackTrace;
-            else
-                Code = "";
+
         }
+
+        public InnerErrorResult(string code, string message, Exception e, bool outputStackTrace)
+        {
+            Code = code;
+            Message = message;
+            Error = e.Message;
+            if (outputStackTrace)
+                SourceCode = e.StackTrace;
+            else
+                SourceCode = "";
+        }
+
+        public string Message { get; set; }
 
         public string Error { get; set; }
 
         public string Code { get; set; }
 
+        public string SourceCode { get; set; }
+
         public override bool HasBody => true;
 
         public override void Setting(HttpResponse response)
         {
-            response.Request.Server.RequestError();
-            response.Code = "500";
-            response.CodeMsg = "server inner error!";
+            response.Code = Code;
+            response.CodeMsg = Message;
             response.Request.ClearStream();
 
         }
 
         public override void Write(PipeStream stream, HttpResponse response)
         {
-            stream.WriteLine(Error);
-            stream.WriteLine(Code);
+            stream.WriteLine(Message);
+            if (!string.IsNullOrEmpty(Error))
+            {
+                stream.WriteLine(Error);
+            }
+            if (!string.IsNullOrEmpty(SourceCode))
+            {
+                stream.WriteLine(SourceCode);
+            }
+        }
+    }
+
+    public class UnauthorizedResult : ResultBase
+    {
+        public UnauthorizedResult(string message)
+        {
+            Message = message;
+        }
+
+        public override void Setting(HttpResponse response)
+        {
+            response.Code = "401";
+            response.CodeMsg = "Unauthorized";
+            response.Request.ClearStream();
+        }
+
+        public override bool HasBody => true;
+
+        public string Message { get; set; }
+
+        public override void Write(PipeStream stream, HttpResponse response)
+        {
+            stream.Write(Message);
         }
     }
 
@@ -140,9 +210,8 @@ namespace BeetleX.FastHttpApi
 
         public override void Setting(HttpResponse response)
         {
-            response.Request.Server.RequestError();
             response.Code = "403";
-            response.CodeMsg = "not support";
+            response.CodeMsg = "No permission";
             response.Request.ClearStream();
         }
 
@@ -198,23 +267,93 @@ namespace BeetleX.FastHttpApi
 
     public class JsonResult : ResultBase
     {
-        public JsonResult(object data)
+        public JsonResult(object data, bool autoGzip = false)
         {
             Data = data;
+            mAutoGzip = autoGzip;
+            if (autoGzip)
+                OnSerialize();
         }
 
         public object Data { get; set; }
 
-        public override string ContentType => "application/json";
+        private bool mAutoGzip = false;
+
+        private ArraySegment<byte> mJsonData;
+
+        [ThreadStatic]
+        private static System.Text.StringBuilder mJsonText;
+
+        private void OnSerialize()
+        {
+            if (mJsonText == null)
+                mJsonText = new System.Text.StringBuilder();
+            mJsonText.Clear();
+            JsonSerializer serializer = new JsonSerializer();
+            System.IO.StringWriter writer = new System.IO.StringWriter(mJsonText);
+            JsonTextWriter jsonTextWriter = new JsonTextWriter(writer);
+            serializer.Serialize(jsonTextWriter, Data);
+            var charbuffer = System.Buffers.ArrayPool<Char>.Shared.Rent(mJsonText.Length);
+            mJsonText.CopyTo(0, charbuffer, 0, mJsonText.Length);
+            try
+            {
+                var bytes = System.Buffers.ArrayPool<byte>.Shared.Rent(mJsonText.Length * 6);
+                var len = System.Text.Encoding.UTF8.GetBytes(charbuffer, 0, mJsonText.Length, bytes, 0);
+                mJsonData = new ArraySegment<byte>(bytes, 0, len);
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<char>.Shared.Return(charbuffer);
+            }
+        }
+
+        public override void Setting(HttpResponse response)
+        {
+            base.Setting(response);
+            if (mAutoGzip && mJsonData.Count > 1024 * 2)
+            {
+                response.Header.Add("Content-Encoding", "gzip");
+            }
+        }
+
+        public override IHeaderItem ContentType => ContentTypes.JSON;
 
         public override bool HasBody => true;
 
         public override void Write(PipeStream stream, HttpResponse response)
         {
-            using (stream.LockFree())
+            if (mAutoGzip)
             {
-                response.JsonSerializer.Serialize(response.JsonWriter, Data);
-                response.JsonWriter.Flush();
+                try
+                {
+                    if (mJsonData.Count > 1024 * 2)
+                    {
+                        using (stream.LockFree())
+                        {
+                            using (var gzipStream = new GZipStream(stream, CompressionMode.Compress, true))
+                            {
+                                gzipStream.Write(mJsonData.Array, mJsonData.Offset, mJsonData.Count);
+                                gzipStream.Flush();
+                            }
+                        }
+                    }
+                    else
+                    {
+                        stream.Write(mJsonData.Array, mJsonData.Offset, mJsonData.Count);
+                    }
+                }
+                finally
+                {
+                    System.Buffers.ArrayPool<byte>.Shared.Return(mJsonData.Array);
+                }
+            }
+            else
+            {
+                using (stream.LockFree())
+                {
+                    response.JsonSerializer.Serialize(response.JsonWriter, Data);
+                    response.JsonWriter.Flush();
+                }
             }
         }
     }
@@ -294,4 +433,63 @@ namespace BeetleX.FastHttpApi
         }
     }
 
+    public class FileResult
+    {
+        public FileResult(string file) : this(file, null, false)
+        {
+
+        }
+        public FileResult(string file, string contentType, bool gzip = false)
+        {
+            this.File = file;
+            this.ContentType = contentType;
+            GZip = gzip;
+        }
+
+        public string File { get; set; }
+
+        public string ContentType { get; set; }
+
+        public bool GZip { get; set; } = false;
+    }
+
+    public class DownLoadResult : BeetleX.FastHttpApi.IResult
+    {
+        public DownLoadResult(string text, string fileName, IHeaderItem contentType = null)
+        {
+            mData = Encoding.UTF8.GetBytes(text);
+            mFileName = System.Web.HttpUtility.UrlEncode(fileName);
+            if (contentType != null)
+                mContentType = contentType;
+        }
+
+        public DownLoadResult(byte[] data, string fileName, IHeaderItem contentType = null)
+        {
+            mData = data;
+            mFileName = System.Web.HttpUtility.UrlEncode(fileName);
+            if (contentType != null)
+                mContentType = contentType;
+        }
+
+        private string mFileName;
+
+        private byte[] mData;
+
+        private IHeaderItem mContentType = ContentTypes.OCTET_STREAM;
+
+        public IHeaderItem ContentType => mContentType;
+
+        public int Length { get; set; }
+
+        public bool HasBody => true;
+
+        public void Setting(HttpResponse response)
+        {
+            response.Header.Add("Content-Disposition", $"attachment;filename={mFileName}");
+        }
+        public virtual void Write(PipeStream stream, HttpResponse response)
+        {
+            stream.Write(mData);
+        }
+    }
 }

@@ -37,16 +37,19 @@ namespace BeetleX.FastHttpApi
 
         private long mLastTime;
 
+        private int mReceives = 0;
+
         private DataFrame mDataPacket;
 
         private WebSockets.IDataFrameSerializer mDataPacketSerializer;
 
         private void OnHttpDecode(ISession session, PipeStream pstream)
         {
-        START:
+            mReceives++;
             if (mRequest == null)
             {
-                mRequest = mServer.CreateRequest(session); 
+                mRequest = mServer.CreateRequest(session);
+                mRequest.ID = HttpRequest.GetID();
             }
             if (mRequest.Read(pstream) == LoadedState.Completed)
             {
@@ -57,31 +60,83 @@ namespace BeetleX.FastHttpApi
                 finally
                 {
                     mRequest = null;
+                    mReceives = 0;
                 }
-                if (pstream.Length == 0)
-                    return;
-                goto START;
+                return;
             }
             else
             {
+                HttpToken token = (HttpToken)session.Tag;
                 if (session.Server.EnableLog(LogType.Info))
-                    session.Server.Log(LogType.Info, session, $"{session.RemoteEndPoint} Multi receive to http request");
-                if ((int)mRequest.State < (int)LoadedState.Header && pstream.Length > 1024 * 4)
+                    session.Server.Log(LogType.Info, session, $"HTTP {mRequest.ID} {session.RemoteEndPoint} request from multi receive");
+                if (mRequest.State == LoadedState.None)
+                {
+                    if (mReceives > 3)
+                    {
+                        if (session.Server.EnableLog(LogType.Warring))
+                        {
+                            session.Server.Log(LogType.Warring, session, $"HTTP {mRequest.ID} {session.RemoteEndPoint} receive data error!");
+                        }
+                        token.KeepAlive = false;
+                        var response = mRequest.CreateResponse();
+                        InnerErrorResult innerErrorResult = new InnerErrorResult("400", "Request http receive data error!");
+                        response.Result(innerErrorResult);
+                        return;
+                    }
+                    if (pstream.FirstBuffer.Length > 10)
+                    {
+                        var span = pstream.FirstBuffer.Memory.Slice(0, 10).Span;
+                        var method = Encoding.ASCII.GetString(span.ToArray());
+                        bool ismethod = method.IndexOf("GET") == 0 || method.IndexOf("POST") == 0 || method.IndexOf("HEAD") == 0 ||
+                            method.IndexOf("PUT") == 0 || method.IndexOf("DELETE") == 0 || method.IndexOf("CONNECT") == 0 || method.IndexOf("OPTIONS") == 0 ||
+                            method.IndexOf("TRACE") == 0;
+                        if (!ismethod)
+                        {
+                            if (session.Server.EnableLog(LogType.Warring))
+                            {
+                                session.Server.Log(LogType.Warring, session, $"HTTP {mRequest.ID} {session.RemoteEndPoint} protocol data error!");
+                            }
+                            token.KeepAlive = false;
+                            var response = mRequest.CreateResponse();
+                            InnerErrorResult innerErrorResult = new InnerErrorResult("400", "Request http protocol data error!");
+                            response.Result(innerErrorResult);
+                            return;
+                        }
+                    }
+                }
+                if ((int)mRequest.State < (int)LoadedState.Header && (pstream.Length > 1024 * 4 || mReceives > 20))
                 {
                     if (session.Server.EnableLog(LogType.Warring))
                     {
-                        session.Server.Log(LogType.Warring, session, "{0} http header too long!", session.RemoteEndPoint);
+                        session.Server.Log(LogType.Warring, session, $"HTTP {mRequest.ID} {session.RemoteEndPoint} header too long!");
                     }
-                    session.Dispose();
+                    token.KeepAlive = false;
+                    var response = mRequest.CreateResponse();
+                    InnerErrorResult innerErrorResult = new InnerErrorResult("400", "Request header too large");
+                    response.Result(innerErrorResult);
                 }
                 else if (mRequest.Length > mServerConfig.MaxBodyLength)
                 {
                     if (session.Server.EnableLog(LogType.Warring))
                     {
-                        session.Server.Log(LogType.Warring, session, "{0} http body too long!", session.RemoteEndPoint);
+                        session.Server.Log(LogType.Warring, session, $"HTTP {mRequest.ID} {session.RemoteEndPoint} body too long!");
                     }
-                    session.Dispose();
+                    token.KeepAlive = false;
+                    var response = mRequest.CreateResponse();
+                    InnerErrorResult innerErrorResult = new InnerErrorResult("400", "Request entity too large");
+                    response.Result(innerErrorResult);
                     return;
+                }
+                if (mReceives > 10 & pstream.Length < mReceives * 256)
+                {
+                    if (session.Server.EnableLog(LogType.Warring))
+                    {
+                        session.Server.Log(LogType.Warring, session, $"HTTP {mRequest.ID} {session.RemoteEndPoint} protocol data commit exception!");
+                    }
+                    token.KeepAlive = false;
+                    var response = mRequest.CreateResponse();
+                    InnerErrorResult innerErrorResult = new InnerErrorResult("400", "protocol data commit exception");
+                    response.Result(innerErrorResult);
                 }
                 return;
             }
@@ -91,32 +146,39 @@ namespace BeetleX.FastHttpApi
         START:
             if (mDataPacket == null)
             {
-                mDataPacket = new DataFrame();
+                mDataPacket = new DataFrame(mServer);
                 mDataPacket.DataPacketSerializer = this.mDataPacketSerializer;
             }
+            mReceives++;
             if (mDataPacket.Read(pstream) == DataPacketLoadStep.Completed)
             {
                 mWebSocketRequest++;
                 long now = session.Server.GetRunTime();
-                if (now - mLastTime > 1000)
+                if (now - mLastTime < 1000)
                 {
                     if (mServerConfig.WebSocketMaxRPS > 0 && mWebSocketRequest > mServerConfig.WebSocketMaxRPS)
                     {
                         if (session.Server.EnableLog(LogType.Warring))
                         {
-                            session.Server.Log(LogType.Warring, session, "{0} websocket session rps to max!", session.RemoteEndPoint);
+                            session.Server.Log(LogType.Warring, session, $"Websocket {mRequest?.ID} {session.RemoteEndPoint} session rps limit!");
                         }
-                        session.Dispose();
+                        HttpToken token = (HttpToken)session.Tag;
+                        token.KeepAlive = false;
+                        var error = new ActionResult(500, "session rps limit!");
+                        var frame = mServer.CreateDataFrame(error);
+                        frame.Send(session);
+                        //  session.Dispose();
                     }
-                    else
-                    {
-                        mWebSocketRequest = 0;
-                        mLastTime = now;
-                    }
+                }
+                else
+                {
+                    mWebSocketRequest = 0;
+                    mLastTime = now;
                 }
                 DataFrame data = mDataPacket;
                 mDataPacket = null;
                 Completed?.Invoke(this, mCompletedArgs.SetInfo(session, data));
+                mReceives = 0;
                 if (pstream.Length > 0)
                     goto START;
             }
@@ -124,31 +186,63 @@ namespace BeetleX.FastHttpApi
             {
                 if (pstream.Length > mServerConfig.MaxBodyLength)
                 {
+                    if (session.Server.EnableLog(LogType.Warring))
+                    {
+                        session.Server.Log(LogType.Warring, session, $"Websocket {mRequest?.ID} {session.RemoteEndPoint} protocol data is too long!");
+                    }
                     session.Dispose();
                 }
+
+                if (mReceives > 10 & pstream.Length < mReceives * 512)
+                {
+                    if (session.Server.EnableLog(LogType.Warring))
+                    {
+                        session.Server.Log(LogType.Warring, session, $"Websocket {mRequest?.ID} {session.RemoteEndPoint} protocol data commit exception!");
+                    }
+                    session.Dispose();
+                }
+
             }
         }
 
         public void Decode(ISession session, Stream stream)
         {
             HttpToken token = (HttpToken)session.Tag;
-            PipeStream pstream = stream.ToPipeStream();
-            if (pstream.Length > mServerConfig.MaxBodyLength)
+            try
+            {
+                PipeStream pstream = stream.ToPipeStream();
+                if (pstream.Length > mServerConfig.MaxBodyLength)
+                {
+                    if (session.Server.EnableLog(LogType.Warring))
+                    {
+                        session.Server.Log(LogType.Warring, session, $"HTTP {session.RemoteEndPoint} protocol data to long!");
+                    }
+                    session.Dispose();
+                    return;
+                }
+                if (!token.WebSocket)
+                {
+                    OnHttpDecode(session, pstream);
+                }
+                else
+                {
+                    OnWebSocketDecode(session, pstream);
+                }
+            }
+            catch (Exception e_)
             {
                 if (session.Server.EnableLog(LogType.Warring))
                 {
-                    session.Server.Log(LogType.Warring, session, "{0} http protocol data to long!", session.RemoteEndPoint);
+                    if (token.WebSocket)
+                    {
+                        session.Server.Log(LogType.Warring, session, $"Websocket {session.RemoteEndPoint} protocol decoding error {e_.Message}@{e_.StackTrace}!");
+                    }
+                    else
+                    {
+                        session.Server.Log(LogType.Warring, session, $"HTTP {session.RemoteEndPoint} protocol decoding error {e_.Message}@{e_.StackTrace}");
+                    }
                 }
                 session.Dispose();
-                return;
-            }
-            if (!token.WebSocket)
-            {
-                OnHttpDecode(session, pstream);
-            }
-            else
-            {
-                OnWebSocketDecode(session, pstream);
             }
 
         }
@@ -166,25 +260,16 @@ namespace BeetleX.FastHttpApi
         private void OnEncode(ISession session, object data, System.IO.Stream stream)
         {
             PipeStream pstream = stream.ToPipeStream();
-            StaticResurce.FileBlock fb = data as StaticResurce.FileBlock;
-            if (fb != null)
+            IDataResponse dataResponse = data as IDataResponse;
+            if (dataResponse != null)
             {
-                fb.Write(pstream);
+                dataResponse.Write(pstream);
             }
             else
             {
-                DataFrame dataPacket = data as DataFrame;
-                if (dataPacket != null)
-                {
-                    dataPacket.Write(pstream);
-                }
-                else
-                {
-                    HttpResponse response = (HttpResponse)data;
-                    response.Write(pstream);
-                }
+                if (session.Server.EnableLog(LogType.Error))
+                    session.Server.Log(LogType.Error, session, $"HTTP {session.RemoteEndPoint} response {data} no impl  IDataResponse");
             }
-
         }
 
         public byte[] Encode(object data, IServer server)

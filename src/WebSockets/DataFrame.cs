@@ -17,13 +17,14 @@ namespace BeetleX.FastHttpApi.WebSockets
     }
 
 
-    public class DataFrame
+    public class DataFrame : IDataResponse
     {
-        internal DataFrame()
+        internal DataFrame(HttpApiServer server)
         {
             this.FIN = true;
             Type = DataPacketType.text;
             IsMask = false;
+            mServer = server;
         }
 
         const int CHECK_B1 = 0x1;
@@ -50,6 +51,8 @@ namespace BeetleX.FastHttpApi.WebSockets
 
         public bool RSV3 { get; set; }
 
+        private HttpApiServer mServer;
+
         internal IDataFrameSerializer DataPacketSerializer { get; set; }
 
         public DataPacketType Type { get; set; }
@@ -63,6 +66,7 @@ namespace BeetleX.FastHttpApi.WebSockets
         public ulong Length { get; set; }
 
         public byte[] MaskKey { get; set; }
+
 
         private DataPacketLoadStep mLoadStep = DataPacketLoadStep.None;
 
@@ -126,12 +130,19 @@ namespace BeetleX.FastHttpApi.WebSockets
             }
             if (mLoadStep == DataPacketLoadStep.Mask)
             {
-                if (this.Length > 0 && (ulong)stream.Length >= this.Length)
+                if (this.Length == 0)
                 {
-                    if (this.IsMask)
-                        ReadMask(stream);
-                    Body = this.DataPacketSerializer.FrameDeserialize(this, stream);
                     mLoadStep = DataPacketLoadStep.Completed;
+                }
+                else
+                {
+                    if ((ulong)stream.Length >= this.Length)
+                    {
+                        if (this.IsMask)
+                            ReadMask(stream);
+                        Body = this.DataPacketSerializer.FrameDeserialize(this, stream);
+                        mLoadStep = DataPacketLoadStep.Completed;
+                    }
                 }
             }
             return mLoadStep;
@@ -176,77 +187,92 @@ namespace BeetleX.FastHttpApi.WebSockets
             }
             return index;
         }
-
-        internal void Write(PipeStream stream)
+        void IDataResponse.Write(PipeStream stream)
         {
-            byte[] header = new byte[2];
-            if (FIN)
-                header[0] |= CHECK_B8;
-            if (RSV1)
-                header[0] |= CHECK_B7;
-            if (RSV2)
-                header[0] |= CHECK_B6;
-            if (RSV3)
-                header[0] |= CHECK_B5;
-            header[0] |= (byte)Type;
-            if (Body != null)
+            try
             {
-                ArraySegment<byte> data = this.DataPacketSerializer.FrameSerialize(this, Body);
-                try
+                byte[] header = new byte[2];
+                if (FIN)
+                    header[0] |= CHECK_B8;
+                if (RSV1)
+                    header[0] |= CHECK_B7;
+                if (RSV2)
+                    header[0] |= CHECK_B6;
+                if (RSV3)
+                    header[0] |= CHECK_B5;
+                header[0] |= (byte)Type;
+                if (Body != null)
                 {
-                    if (MaskKey == null || MaskKey.Length != 4)
-                        this.IsMask = false;
-                    if (this.IsMask)
+                    ArraySegment<byte> data = this.DataPacketSerializer.FrameSerialize(this, Body);
+                    try
                     {
-                        header[1] |= CHECK_B8;
-                        int offset = data.Offset;
-                        for (int i = offset; i < data.Count; i++)
+                        if (MaskKey == null || MaskKey.Length != 4)
+                            this.IsMask = false;
+                        if (this.IsMask)
                         {
-                            data.Array[i] = (byte)(data.Array[i] ^ MaskKey[(i - offset) % 4]);
+                            header[1] |= CHECK_B8;
+                            int offset = data.Offset;
+                            for (int i = offset; i < data.Count; i++)
+                            {
+                                data.Array[i] = (byte)(data.Array[i] ^ MaskKey[(i - offset) % 4]);
+                            }
                         }
+                        int len = data.Count;
+                        if (len > 125 && len <= UInt16.MaxValue)
+                        {
+                            header[1] |= (byte)126;
+                            stream.Write(header, 0, 2);
+                            stream.Write((UInt16)len);
+                        }
+                        else if (len > UInt16.MaxValue)
+                        {
+                            header[1] |= (byte)127;
+                            stream.Write(header, 0, 2);
+                            stream.Write((ulong)len);
+                        }
+                        else
+                        {
+                            header[1] |= (byte)data.Count;
+                            stream.Write(header, 0, 2);
+                        }
+                        if (IsMask)
+                            stream.Write(MaskKey, 0, 4);
+                        stream.Write(data.Array, data.Offset, data.Count);
                     }
-                    int len = data.Count;
-                    if (len > 125 && len <= UInt16.MaxValue)
+                    finally
                     {
-                        header[1] |= (byte)126;
-                        stream.Write(header, 0, 2);
-                        stream.Write((UInt16)len);
+                        this.DataPacketSerializer.FrameRecovery(data.Array);
                     }
-                    else if (len > UInt16.MaxValue)
-                    {
-                        header[1] |= (byte)127;
-                        stream.Write(header, 0, 2);
-                        stream.Write((ulong)len);
-                    }
-                    else
-                    {
-                        header[1] |= (byte)data.Count;
-                        stream.Write(header, 0, 2);
-                    }
-                    if (IsMask)
-                        stream.Write(MaskKey, 0, 4);
-                    stream.Write(data.Array, data.Offset, data.Count);
                 }
-                finally
+                else
                 {
-                    this.DataPacketSerializer.FrameRecovery(data.Array);
+                    stream.Write(header, 0, 2);
                 }
             }
-            else
+            finally
             {
-                stream.Write(header, 0, 2);
+                //this.DataPacketSerializer = null;
+                //this.Body = null;
             }
         }
 
-        public void Send(ISession session)
+        public void Send(ISession session, bool isError = false)
         {
             HttpToken token = (HttpToken)session.Tag;
             if (token != null && token.WebSocket)
             {
+                if (isError)
+                {
+                    mServer.IncrementResponsed(token.Request, null, 0, HttpApiServer.WEBSOCKET_ERROR, null);
+                }
+                else
+                {
+                    mServer.IncrementResponsed(token.Request, null, 0, HttpApiServer.WEBSOCKET_SUCCESS, null);
+                }
                 session.Send(this);
                 if (session.Server.EnableLog(EventArgs.LogType.Info))
                 {
-                    session.Server.Log(EventArgs.LogType.Info, session, "{0} websocket send data {1}", session.RemoteEndPoint, this.Type.ToString());
+                    session.Server.Log(EventArgs.LogType.Info, session, $"Websocket {token?.Request?.ID} {token?.Request?.RemoteIPAddress} websocket send data {this.Type.ToString()}");
                 }
             }
         }

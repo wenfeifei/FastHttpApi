@@ -47,7 +47,7 @@ namespace BeetleX.FastHttpApi
 
         private int mNextStatu = 0;
 
-        public ServerStatus Next()
+        public ServerStatus Next(bool actionDetail = false)
         {
             if (mServer.BaseServer.GetRunTime() - mLastNextTime > 1000)
             {
@@ -55,11 +55,13 @@ namespace BeetleX.FastHttpApi
                 {
                     mLastNextTime = mServer.BaseServer.GetRunTime();
                     ServerStatus result = new ServerStatus();
+                    result.BeetleXVersion = mServer.BaseServer.GetType().Assembly.GetName().Version.ToString();
+                    result.WebApiVersion = mServer.GetType().Assembly.GetName().Version.ToString();
                     result.ServerName = mServer.Name;
                     result.Host = mServer.Options.Host;
                     result.Port = mServer.Options.Port;
                     TimeSpan ts = (DateTime.Now - mServer.StartTime);
-                    result.RunTime = $"{(long)ts.TotalDays}:{(long)ts.TotalHours}:{(long)ts.TotalMinutes}:{(long)ts.TotalSeconds}";
+                    result.RunTime = $"{(long)ts.Days}:{(long)ts.Hours}:{(long)ts.Minutes}:{(long)ts.Seconds}";
 
                     long time = mServer.BaseServer.GetRunTime();
                     double second = (double)(time - mLastTime) / 1000d;
@@ -74,9 +76,7 @@ namespace BeetleX.FastHttpApi
                     result.TotalMemory = Environment.WorkingSet / 1024;
 
                     result.CurrentConnectinos = mServer.BaseServer.Count;
-                    result.CurrentHttpRequest = (long)mServer.CurrentHttpRequests;
-                    result.CurrentRequest = result.CurrentHttpRequest;// + result.CurrentWSRequest;
-                                                                      // result.CurrentWSRequest = (long)mServer.CurrentWebSocketRequests;
+                   
 
                     result.TotalRequest = mServer.TotalRequest;
                     result.RequestPer = (long)((result.TotalRequest - mLastTotalRequest) / second);
@@ -97,17 +97,28 @@ namespace BeetleX.FastHttpApi
                     mLastSendBytes = result.TotalSendBytes;
                     result.TotalSendBytes = GetByteMB(result.TotalSendBytes);
                     result.SendBytesPer = GetByteMB(result.SendBytesPer);
-                    mInfo = result;
-                    foreach (var item in mServer.ActionFactory.Handlers)
+                    if (actionDetail)
                     {
-                        ActionStatus actionStatus = new ActionStatus();
-                        actionStatus.Url = item.SourceUrl;
-                        actionStatus.Requests = item.Requests;
-                        actionStatus.RequestsPer = (long)((item.Requests - item.LastRequests) / second);
-                        item.LastRequests = item.Requests;
-                        mInfo.Actions.Add(actionStatus);
+                        foreach (var item in mServer.ActionFactory.Handlers)
+                        {
+                            ActionStatus actionStatus = new ActionStatus();
+                            actionStatus.ID = item.ID;
+                            actionStatus.Path = item.Path;
+                            actionStatus.Version = item.Version;
+                            actionStatus.AssmblyName = item.AssmblyName;
+                            actionStatus.MaxRPS = item.MaxRPS;
+                            actionStatus.Url = item.SourceUrl;
+                            actionStatus.Requests = item.Requests;
+                            actionStatus.RequestsPer = (long)((item.Requests - item.LastRequests) / second);
+                            actionStatus.Errors = item.Errors;
+                            actionStatus.ErrorsPer = (long)((item.Errors - item.LastErrors) / second);
+                            item.LastErrors = item.Errors;
+                            item.LastRequests = item.Requests;
+                            result.Actions.Add(actionStatus);
+                        }
+                        result.Actions.Sort((o, e) => o.Url.CompareTo(e.Url));
                     }
-                    mInfo.Actions.Sort((o, e) => o.Url.CompareTo(e.Url));
+                    mInfo = result;
                     System.Threading.Interlocked.Exchange(ref mNextStatu, 0);
                 }
             }
@@ -125,6 +136,10 @@ namespace BeetleX.FastHttpApi
             {
                 Actions = new List<ActionStatus>();
             }
+
+            public string BeetleXVersion { get; set; }
+
+            public string WebApiVersion { get; set; }
 
             public string Host { get; set; }
 
@@ -146,11 +161,11 @@ namespace BeetleX.FastHttpApi
 
             public long CurrentConnectinos { get; set; }
 
-            public long CurrentRequest { get; set; }
+            // public long CurrentRequest { get; set; }
 
             //  public long CurrentWSRequest { get; set; }
 
-            public long CurrentHttpRequest { get; set; }
+            //public long CurrentHttpRequest { get; set; }
 
             public double TotalSendBytes { get; set; }
 
@@ -170,10 +185,27 @@ namespace BeetleX.FastHttpApi
 
         public class ActionStatus
         {
+
+            public int ID { get; set; }
+
+            public string Path { get; set; }
+
+            public string Version { get; set; }
+
+            public string AssmblyName { get; set; }
+
+            public int MaxRPS { get; set; }
+
             public string Url { get; set; }
 
             public long Requests { get; set; }
+
             public long RequestsPer { get; set; }
+
+            public long Errors { get; set; }
+
+            public long ErrorsPer { get; set; }
+
         }
     }
 }

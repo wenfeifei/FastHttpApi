@@ -1,11 +1,53 @@
 ﻿using BeetleX.Buffers;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using static BeetleX.FastHttpApi.HttpParse;
 
 namespace BeetleX.FastHttpApi
 {
+
+    public interface IHeaderItem
+    {
+        void Write(PipeStream stream);
+    }
+
+    public class ContentType : IHeaderItem
+    {
+
+        public ContentType(string type)
+        {
+            mData = Encoding.UTF8.GetBytes($"Content-Type: {type}\r\n");
+        }
+
+        private byte[] mData;
+
+        public void Write(PipeStream stream)
+        {
+            stream.Write(mData, 0, mData.Length);
+        }
+    }
+
+
+    public class HeaderItem : IHeaderItem
+    {
+        public HeaderItem(string value)
+        {
+            if (value.IndexOf("\r\n") == -1)
+                value += "\r\n";
+            mData = Encoding.UTF8.GetBytes(value);
+        }
+
+        private byte[] mData;
+
+        public void Write(PipeStream stream)
+        {
+            stream.Write(mData, 0, mData.Length);
+        }
+    }
+
+
     public class HeaderTypeFactory
     {
 
@@ -18,6 +60,8 @@ namespace BeetleX.FastHttpApi
         public static byte[] CHUNKED_BYTES;
 
         public static byte[] LINE_BYTES;
+
+        public static byte[] HTTP_V11_BYTES;
 
         public static byte[] SPACE_BYTES;
 
@@ -120,6 +164,7 @@ namespace BeetleX.FastHttpApi
             CONTENT_LENGTH_BYTES = Encoding.UTF8.GetBytes("Content-Length: ");
             TOW_LINE_BYTES = Encoding.UTF8.GetBytes("\r\n\r\n");
             SERVAR_HEADER_BYTES = Encoding.UTF8.GetBytes("Server: BeetleX\r\n");
+            HTTP_V11_BYTES = Encoding.UTF8.GetBytes("HTTP/1.1");
             Add(HeaderTypeFactory.AGE);
             Add(HeaderTypeFactory.AUTHORIZATION);
             Add(HeaderTypeFactory.WWW_AUTHENTICATE);
@@ -156,14 +201,17 @@ namespace BeetleX.FastHttpApi
             Add(HeaderTypeFactory.USER_AGENT);
         }
 
-        private static System.Collections.Generic.Dictionary<int, HeaderType> mHeaderTypes = new Dictionary<int, HeaderType>();
+        private static System.Collections.Generic.Dictionary<long, HeaderType> mHeaderTypes = new Dictionary<long, HeaderType>();
 
         private static int mCount;
 
         private static void Add(String name)
         {
-            HeaderType type = new HeaderType(name);
-            mHeaderTypes[type.ID] = type;
+            lock (mHeaderTypes)
+            {
+                HeaderType type = new HeaderType(name);
+                mHeaderTypes[type.ID] = type;
+            }
         }
 
         private static void Add(string name, HeaderType type)
@@ -172,7 +220,7 @@ namespace BeetleX.FastHttpApi
             {
                 lock (mHeaderTypes)
                 {
-                    int id = name.GetHashCode();
+                    long id = HeaderType.GetNameCode(name);
                     mHeaderTypes[id] = type;
                 }
                 System.Threading.Interlocked.Increment(ref mCount);
@@ -182,18 +230,25 @@ namespace BeetleX.FastHttpApi
         public static HeaderType Find(string name)
         {
             HeaderType type;
-            int id = name.GetHashCode();
+            long id = HeaderType.GetNameCode(name);
             if (mHeaderTypes.TryGetValue(id, out type))
                 return type;
-            foreach (var item in mHeaderTypes.Values)
+            HeaderType[] items;
+            lock (mHeaderTypes)
             {
-                if (item.Compare(name))
+                if (mHeaderTypes.TryGetValue(id, out type))
+                    return type;
+                items = mHeaderTypes.Values.ToArray();
+                foreach (var item in items)
                 {
-                    Add(name, item);
-                    return item;
+                    if (item.Compare(name))
+                    {
+                        type = item;
+                    }
                 }
             }
-            type = new HeaderType(name);
+            if (type == null)
+                type = new HeaderType(name);
             Add(name, type);
             return type;
         }
@@ -208,18 +263,37 @@ namespace BeetleX.FastHttpApi
     public class Header
     {
 
-        private Dictionary<int, HeaderValue> mValues = new Dictionary<int, HeaderValue>(8);
+        private Dictionary<long, HeaderValue> mValues = new Dictionary<long, HeaderValue>();
 
         public void Add(string name, string value)
         {
+            if (string.IsNullOrEmpty(name))
+                return;
             if (value == null)
                 value = string.Empty;
             Find(name).Value = value;
         }
 
+        public int Count
+        {
+            get
+            {
+                return mValues.Count;
+            }
+        }
+
         public void Clear()
         {
             mValues.Clear();
+        }
+
+
+        public IDictionary<string, string> Copy()
+        {
+            Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.CurrentCultureIgnoreCase);
+            foreach (var item in mValues)
+                result[item.Value.Type.Name] = item.Value.Value;
+            return result;
         }
 
         private HeaderValue Find(string name)
@@ -236,9 +310,15 @@ namespace BeetleX.FastHttpApi
         private HeaderValue FindOnly(string name)
         {
             HeaderValue result;
-            int id = name.GetHashCode();
+            long id = HeaderType.GetNameCode(name);
             mValues.TryGetValue(id, out result);
             return result;
+        }
+
+        public void Remove(string name)
+        {
+            long id = HeaderType.GetNameCode(name);
+            mValues.Remove(id);
         }
 
         public string this[string name]
@@ -253,6 +333,8 @@ namespace BeetleX.FastHttpApi
             }
             set
             {
+                if (string.IsNullOrEmpty(name))
+                    return;
                 Find(name).Value = value;
             }
         }
@@ -267,31 +349,28 @@ namespace BeetleX.FastHttpApi
 
         public bool Read(PipeStream stream, Cookies cookies)
         {
-            string lineData;
-            while (stream.TryReadWith(HeaderTypeFactory.LINE_BYTES, out lineData))
+            Span<char> lineData;
+            while (stream.ReadLine(out lineData))
             {
-                if (string.IsNullOrEmpty(lineData))
+                if (lineData.Length == 0)
                 {
                     return true;
                 }
                 else
                 {
                     ReadOnlySpan<Char> line = lineData;
+                    Tuple<string, string> result = HttpParse.AnalyzeHeader(line);
+                    this[result.Item1] = result.Item2;
                     if (line[0] == 'C' && line[5] == 'e' && line[1] == 'o' && line[2] == 'o' && line[3] == 'k' && line[4] == 'i')
                     {
                         HttpParse.AnalyzeCookie(line.Slice(8, line.Length - 8), cookies);
-                    }
-                    else
-                    {
-                        Tuple<string, string> result = HttpParse.AnalyzeHeader(line);
-                        this[result.Item1] = result.Item2;
                     }
                 }
             }
             return false;
         }
 
-        internal void Write(PipeStream stream)
+        public void Write(PipeStream stream)
         {
             foreach (var item in mValues.Values)
             {
@@ -327,6 +406,8 @@ namespace BeetleX.FastHttpApi
             byte[] buffer = HttpParse.GetByteBuffer();
             int count = Type.Bytes.Length;
             System.Buffer.BlockCopy(Type.Bytes, 0, buffer, 0, count);
+            if (Value == null)
+                Value = string.Empty;
             count = count + Encoding.UTF8.GetBytes(Value, 0, Value.Length, buffer, count);
             buffer[count] = HeaderTypeFactory._LINE_R;
             buffer[count + 1] = HeaderTypeFactory._LINE_N;
@@ -334,26 +415,26 @@ namespace BeetleX.FastHttpApi
         }
     }
 
-
     public class HeaderType
     {
+
+        public static long GetNameCode(string name)
+        {
+            return (long)name.GetHashCode() << 16 | (ushort)name.Length;
+        }
+
         public HeaderType(string name)
         {
             Name = name;
             Bytes = Encoding.UTF8.GetBytes(name + ": ");
-            ID = name.GetHashCode();
+            ID = GetNameCode(name);
         }
 
         public string Name { get; set; }
 
         public byte[] Bytes { get; set; }
 
-        public int ID { get; set; }
-
-        public override int GetHashCode()
-        {
-            return this.ID;
-        }
+        public long ID { get; set; }
 
         public bool Compare(string value)
         {

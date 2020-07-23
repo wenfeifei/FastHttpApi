@@ -3,6 +3,8 @@ using BeetleX.FastHttpApi;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Text;
 
 namespace BeetleX.FastHttpApi
@@ -22,30 +24,83 @@ namespace BeetleX.FastHttpApi
                 System.IO.Path.DirectorySeparatorChar + "views";
             DefaultPage = "index.html;index.htm";
             Debug = false;
-            Manager = "admin";
-            ManagerPWD = "123456";
             WriteLog = false;
             MaxConnections = 2000;
             NoGzipFiles = "jpg;jpeg;png;gif;png;ico;zip;rar";
             CacheFiles = "html;htm;js;css";
-            BufferSize = 1024 * 8;
+            BufferSize = 1024 * 4;
             WebSocketMaxRPS = 30;
             LogLevel = EventArgs.LogType.Warring;
-            this.LogToConsole = false;
+            LogToConsole = false;
             NotLoadFolder = @"\Files;\Images";
             FileManager = false;
             CacheFileSize = 500;
             PacketCombined = 0;
-            UrlIgnoreCase = true;
+            // UrlIgnoreCase = true;
             UseIPv6 = true;
-            SessionTimeOut = 60 * 60;
+            SessionTimeOut = 60 * 10;
             BufferPoolMaxMemory = 500;
             SSLPort = 443;
             StaticResurceCacheTime = 0;
+            Settings = new List<Setting>();
+            MaxrpsSettings = new List<ActionMaxrps>();
+            CacheLogMaxSize = 0;
+            IOQueueEnabled = false;
+            Statistical = true;
+            int threads = (Environment.ProcessorCount / 2);
+            if (threads == 0)
+                threads = 1;
+            IOQueues = Math.Min(threads, 16);
+            BufferPoolGroups = 4;
         }
 
-        public int StaticResurceCacheTime { get; set; }
+        [Conditional("DEBUG")]
+        public void SetDebug(string viewpath = null)
+        {
+            Debug = true;
+            if (string.IsNullOrEmpty(viewpath))
+            {
+                string path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..\\..\\..\\"));
+                path += @"views";
+                StaticResourcePath = path;
+            }
+            else
+            {
+                StaticResourcePath = viewpath;
+            }
+        }
 
+        public int IPRpsLimit { get; set; } = 0;
+
+        public int IPRpsLimitDisableTime { get; set; } = 1000 * 1800;
+
+        public int MaxWaitQueue { get; set; } = 50;
+
+        public int BufferPoolSize { get; set; } = 10;
+
+        public int BufferPoolGroups { get; set; }
+
+        public int IOQueues { get; set; }
+
+        public bool SyncAccept { get; set; } = true;
+
+        public bool ManageApiEnabled { get; set; } = true;
+
+        public bool Statistical { get; set; }
+
+        public bool IOQueueEnabled { get; set; }
+
+        public int CacheLogMaxSize { get; set; }
+
+        public List<ActionMaxrps> MaxrpsSettings { get; set; }
+
+        public List<Setting> Settings { get; set; }
+
+        public string AccessKey { get; set; }
+
+        public bool AutoGzip { get; set; } = false;
+
+        public int StaticResurceCacheTime { get; set; }
 
         public int BufferPoolMaxMemory { get; set; }
 
@@ -53,10 +108,15 @@ namespace BeetleX.FastHttpApi
 
         public bool UseIPv6 { get; set; }
 
-        public bool UrlIgnoreCase { get; set; }
+        public List<VirtualFolder> Virtuals { get; set; } = new List<VirtualFolder>();
+
+        // public bool UrlIgnoreCase { get; set; }
 
         [JsonIgnore]
-        public UrlRoute[] Routes { get; set; }
+        public OptionsAttribute CrossDomain { get; set; }
+
+        //[JsonIgnore]
+        //public UrlRoute[] Routes { get; set; }
 
         public int PacketCombined { get; set; }
 
@@ -91,6 +151,14 @@ namespace BeetleX.FastHttpApi
         public string Host { get; set; }
 
         public bool Debug { get; set; }
+
+        public bool FixedConverter { get; set; } = false;
+
+        public bool AgentRewrite { get; set; } = false;
+
+        public bool RewriteIgnoreCase { get; set; } = true;
+
+        public int RewriteCachedSize { get; set; } = 500000;
 
         public int Port { get; set; }
 
@@ -147,5 +215,37 @@ namespace BeetleX.FastHttpApi
         }
 
         public string StaticResourcePath { get; set; }
+
+        public string GetValue(string name)
+        {
+            foreach (var item in Settings)
+                if (item.Name == name)
+                    return item.Value;
+            return null;
+        }
+
+        public int GetActionMaxrps(string url)
+        {
+            foreach (var item in MaxrpsSettings)
+            {
+                if (item.Url == url)
+                    return item.MaxRps;
+            }
+            return 0;
+        }
+    }
+
+    public class ActionMaxrps
+    {
+        public string Url { get; set; }
+
+        public int MaxRps { get; set; }
+    }
+
+    public class Setting
+    {
+        public string Name { get; set; }
+
+        public string Value { get; set; }
     }
 }

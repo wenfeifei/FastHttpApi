@@ -75,23 +75,30 @@ namespace BeetleX.FastHttpApi.StaticResurce
             {
                 length = (int)fsstream.Length;
                 byte[] buffer = HttpParse.GetByteBuffer();
-                using (System.IO.MemoryStream memory = new MemoryStream())
+                if (length > 0)
                 {
-                    using (GZipStream gstream = new GZipStream(memory, CompressionMode.Compress))
+                    using (System.IO.MemoryStream memory = new MemoryStream())
                     {
-                        while (length > 0)
+                        using (GZipStream gstream = new GZipStream(memory, CompressionMode.Compress))
                         {
-                            int len = fsstream.Read(buffer, 0, buffer.Length);
-                            length -= len;
-                            gstream.Write(buffer, 0, len);
-                            gstream.Flush();
-                            if (length == 0)
-                                Data = memory.ToArray();
+                            while (length > 0)
+                            {
+                                int len = fsstream.Read(buffer, 0, buffer.Length);
+                                length -= len;
+                                gstream.Write(buffer, 0, len);
+                                gstream.Flush();
+                                if (length == 0)
+                                    Data = memory.ToArray();
+                            }
                         }
                     }
                 }
+                else
+                {
+                    Data = new Byte[0];
+                }
             }
-            fsstream.Close();
+            //  fsstream.Close();
             Length = Data.Length;
         }
 
@@ -110,7 +117,7 @@ namespace BeetleX.FastHttpApi.StaticResurce
                     Length = (int)stream.Length;
                 }
             }
-            if (Length < 1024 * 1024 && !string.IsNullOrEmpty(UrlName))
+            if (Length < 1024 * 1024*5 && !string.IsNullOrEmpty(UrlName))
             {
                 FileMD5 = FMD5(FullName, this.Assembly);
             }
